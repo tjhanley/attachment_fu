@@ -1,3 +1,4 @@
+require 'filemagic'
 module Technoweenie # :nodoc:
   module AttachmentFu # :nodoc:
     @@default_processors = %w(ImageScience Rmagick MiniMagick Gd2 CoreImage)
@@ -42,6 +43,7 @@ module Technoweenie # :nodoc:
     module ActMethods
       # Options:
       # *  <tt>:content_type</tt> - Allowed content types.  Allows all by default.  Use :image to allow all standard image types.
+      # *  <tt>:content_type_validation</tt> - Validate that the uploaded file actually has data of the allowed content_types. Unix only. Defaults to false.
       # *  <tt>:min_size</tt> - Minimum size allowed.  1 byte is the default.
       # *  <tt>:max_size</tt> - Maximum size allowed.  1.megabyte is the default.
       # *  <tt>:size</tt> - Range of sizes allowed.  (1..1.megabyte) is the default.  This overrides the :min_size and :max_size options.
@@ -84,6 +86,7 @@ module Technoweenie # :nodoc:
         options[:s3_access]        ||= :public_read
         options[:cloudfront]       ||= false
         options[:content_type] = [options[:content_type]].flatten.collect! { |t| t == :image ? Technoweenie::AttachmentFu.content_types : t }.flatten unless options[:content_type].nil?
+        options[:content_type_validation] ||= false
 
         unless options[:thumbnails].is_a?(Hash)
           raise ArgumentError, ":thumbnails option should be a hash: e.g. :thumbnails => { :foo => '50x50' }"
@@ -97,7 +100,8 @@ module Technoweenie # :nodoc:
         self.attachment_options = options
 
         attr_accessor :thumbnail_resize_options
-
+        
+        attachment_options[:content_type_regexp] = Regexp.new(attachment_options[:content_type].join('|'))
         attachment_options[:storage]     ||= (attachment_options[:file_system_path] || attachment_options[:path_prefix]) ? :file_system : :db_file
         attachment_options[:storage]     ||= parent_options[:storage]
         attachment_options[:path_prefix] ||= attachment_options[:file_system_path]
@@ -169,6 +173,7 @@ module Technoweenie # :nodoc:
       def validates_as_attachment
         validates_presence_of :size, :content_type, :filename
         validate              :attachment_attributes_valid?
+        validate              :attachment_content_type_valid? if self.attachment_options[:content_type_validation]
       end
 
       # Returns true or false if the given content type is recognized as an image.
@@ -182,7 +187,7 @@ module Technoweenie # :nodoc:
         base.before_validation :set_size_from_temp_path
         base.after_save :after_process_attachment
         base.after_destroy :destroy_file
-        base.after_validation :process_attachment
+        base.before_save :process_attachment
         if defined?(::ActiveSupport::Callbacks)
           base.define_callbacks :after_resize, :after_attachment_saved, :before_thumbnail_saved
         end
@@ -433,6 +438,22 @@ module Technoweenie # :nodoc:
             else
               errors.add attr_name, ActiveRecord::Errors.default_error_messages[:inclusion] unless enum.nil? || enum.include?(send(attr_name))
             end
+          end
+        end
+
+        # 
+        # Validates that the uploaded file's data is actually of
+        # an acceptable mime type.
+        # This is necessary because the CGI mime-type identifier just uses
+        # the filename, which can be inaccurate.
+        #
+        # Unix-dependent method.  Calls unix file(1) command to determine mime type by
+        # investigating the first bytes of the file.
+        def attachment_content_type_valid?       
+          fm = FileMagic.new(FileMagic::MAGIC_MIME)
+          output = fm.file("#{self.temp_path}")
+          unless (! output.blank?) && (output =~ attachment_options[:content_type_regexp])
+            errors.add_to_base("File must have a valid content type")
           end
         end
 
